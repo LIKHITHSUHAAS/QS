@@ -131,6 +131,9 @@ elif app_mode == "Real-World AI Applications":
     st.sidebar.divider()
     
     if app_choice == "SVM Hyperparameter Tuning":
+        from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+        from sklearn.model_selection import RandomizedSearchCV
+        
         st.subheader("Neural Tuning: Search the Hidden Accuracy Hyper-Plane")
         st.markdown("We are finding the optimal **C** and **Gamma** weights for a Breast Cancer Prediction AI. The swarm generates an invisible map of 'High Accuracy' and explores it.")
         
@@ -140,6 +143,18 @@ elif app_mode == "Real-World AI Applications":
             X, y = StandardScaler().fit_transform(data.data), data.target
             X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
             
+            # --- 1. Default SVM ---
+            clf_default = SVC(kernel='rbf', random_state=42)
+            clf_default.fit(X_tr, y_tr)
+            preds_def = clf_default.predict(X_te)
+            
+            # --- 2. Random Search SVM ---
+            param_dist = {'C': np.logspace(-1, 2, 100), 'gamma': np.logspace(-4, 0, 100)}
+            rs = RandomizedSearchCV(SVC(kernel='rbf', random_state=42), param_dist, n_iter=15, cv=3, random_state=42, n_jobs=-1)
+            rs.fit(X_tr, y_tr)
+            preds_rs = rs.predict(X_te)
+            
+            # --- 3. ABQO SVM Tuning ---
             def svm_obj(params):
                 C_v = np.clip(params[0], 0.1, 100.0)
                 g_v = np.clip(params[1], 0.0001, 1.0)
@@ -161,11 +176,37 @@ elif app_mode == "Real-World AI Applications":
                 best, err, hist = opt.optimize()
                 end_time = time.time()
                 
-            best_acc = (1.0 - err) * 100
-            st.success(f"Tuning Finished in {end_time - start_time:.2f} seconds!")
-            st.metric("Optimal Validation Accuracy Found", f"{best_acc:.2f}%")
-            st.write(f"Best Params Found - C: {best[0]:.2f}, Gamma: {best[1]:.4f}")
+            clf_abqo = SVC(kernel='rbf', C=best[0], gamma=best[1], random_state=42)
+            clf_abqo.fit(X_tr, y_tr)
+            preds_abqo = clf_abqo.predict(X_te)
             
+            st.success(f"Tuning Finished in {end_time - start_time:.2f} seconds!")
+            st.write(f"**ABQO Best Params** - C: {best[0]:.2f}, Gamma: {best[1]:.4f}")
+            
+            # --- Metrics & Comparison ---
+            def get_metrics(preds):
+                return {
+                    "Accuracy": accuracy_score(y_te, preds),
+                    "F1 Score": f1_score(y_te, preds, average='weighted'),
+                    "Precision": precision_score(y_te, preds, average='weighted', zero_division=0),
+                    "Recall": recall_score(y_te, preds, average='weighted', zero_division=0)
+                }
+
+            st.subheader("Model Performance Comparison")
+            df_metrics = pd.DataFrame([
+                {"Model": "Default SVM", **get_metrics(preds_def)},
+                {"Model": "Random Search (15 iters)", **get_metrics(preds_rs)},
+                {"Model": "ABQO Optimized", **get_metrics(preds_abqo)}
+            ])
+            
+            df_melt = df_metrics.melt(id_vars="Model", var_name="Metric", value_name="Score")
+            fig_bar = px.bar(df_melt, x="Metric", y="Score", color="Model", barmode="group",
+                             color_discrete_map={"Default SVM": "#94a3b8", "Random Search (15 iters)": "#3b82f6", "ABQO Optimized": "#22c55e"}, 
+                             text_auto=".4f", title="Metrics on Held-Out Test Set")
+            fig_bar.update_layout(yaxis=dict(range=[np.min(df_melt['Score'])*0.9, 1.0]))
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+            # --- Swarm Visualization ---
             st.subheader("Visualizing the Swarm Over the Accuracy Heatmap")
             
             frames = []
@@ -184,6 +225,8 @@ elif app_mode == "Real-World AI Applications":
             st.plotly_chart(fig, use_container_width=True)
 
     elif app_choice == "Optimal Feature Selection":
+        from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+        
         st.subheader("Data Pruning: Eliminate Statistical Noise")
         st.markdown("We feed ABQO a high-dimensional Wine Quality Dataset. The bacteria will eliminate useless classification features, drastically shrinking the dataset size while protecting system accuracy.")
         
@@ -192,10 +235,28 @@ elif app_mode == "Real-World AI Applications":
             X, y = StandardScaler().fit_transform(data.data), data.target
             num_feat = X.shape[1]
             
+            # Split to have a dedicated test set for reliable metrics
+            X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=42)
+            
+            # --- 1. All Features Baseline ---
+            knn_all = KNeighborsClassifier(n_neighbors=5)
+            knn_all.fit(X_tr, y_tr)
+            preds_all = knn_all.predict(X_te)
+            
+            # --- 2. Random Feature Selection Baseline (~50% features) ---
+            np.random.seed(42)  # for reproducibility here
+            rand_mask = np.random.choice([0, 1], size=num_feat)
+            if np.sum(rand_mask) == 0: rand_mask[0] = 1 # Avoid 0 features
+            
+            knn_rand = KNeighborsClassifier(n_neighbors=5)
+            knn_rand.fit(X_tr[:, rand_mask==1], y_tr)
+            preds_rand = knn_rand.predict(X_te[:, rand_mask==1])
+            
+            # --- 3. ABQO Feature Selection ---
             def feat_obj(params):
                 mask = (params > 0.5).astype(int)
                 if np.sum(mask) == 0: return 1.0
-                scores = cross_val_score(KNeighborsClassifier(n_neighbors=5), X[:, mask==1], y, cv=3, n_jobs=-1)
+                scores = cross_val_score(KNeighborsClassifier(n_neighbors=5), X_tr[:, mask==1], y_tr, cv=3, n_jobs=-1)
                 return (1.0 - np.mean(scores)) + 0.01 * (np.sum(mask)/num_feat)
             
             with st.spinner("Bacteria Swarm is analyzing dataset dimension values..."):
@@ -205,10 +266,44 @@ elif app_mode == "Real-World AI Applications":
                 t1 = time.time()
                 
             mask = (b > 0.5).astype(int)
+            if np.sum(mask) == 0: mask[np.random.randint(0, num_feat)] = 1 # Edge case fallback
             sel_feats = [data.feature_names[i] for i in range(num_feat) if mask[i] == 1]
             
-            st.success(f"Reduced Dimensions from 13 down to {len(sel_feats)} in {t1 - t0:.2f} seconds!")
+            knn_abqo = KNeighborsClassifier(n_neighbors=5)
+            knn_abqo.fit(X_tr[:, mask==1], y_tr)
+            preds_abqo = knn_abqo.predict(X_te[:, mask==1])
             
+            st.success(f"Reduced Dimensions from {num_feat} down to {len(sel_feats)} in {t1 - t0:.2f} seconds!")
+            
+            # --- Metrics & Comparison ---
+            def get_metrics(preds):
+                return {
+                    "Accuracy": accuracy_score(y_te, preds),
+                    "F1 Score": f1_score(y_te, preds, average='weighted'),
+                    "Precision": precision_score(y_te, preds, average='weighted', zero_division=0),
+                    "Recall": recall_score(y_te, preds, average='weighted', zero_division=0)
+                }
+
+            st.subheader("Performance vs Dimensionality Comparison")
+            df_metrics = pd.DataFrame([
+                {"Model": f"All Features ({num_feat})", **get_metrics(preds_all)},
+                {"Model": f"Random Features ({np.sum(rand_mask)})", **get_metrics(preds_rand)},
+                {"Model": f"ABQO Selected ({np.sum(mask)})", **get_metrics(preds_abqo)}
+            ])
+            
+            df_melt = df_metrics.melt(id_vars="Model", var_name="Metric", value_name="Score")
+            fig_bar = px.bar(df_melt, x="Metric", y="Score", color="Model", barmode="group",
+                             color_discrete_map={
+                                 f"All Features ({num_feat})": "#94a3b8", 
+                                 f"Random Features ({np.sum(rand_mask)})": "#3b82f6", 
+                                 f"ABQO Selected ({np.sum(mask)})": "#22c55e"
+                             }, 
+                             text_auto=".4f", title="KNN Metrics on Hold-out Set")
+            # Dynamic y-axis scaling based on min score for better visibility
+            min_score = np.min(df_melt['Score'])
+            fig_bar.update_layout(yaxis=dict(range=[min_score * 0.9, 1.0]))
+            st.plotly_chart(fig_bar, use_container_width=True)
+
             # --- Feature Matrix Scanner Visualization ---
             c1, c2 = st.columns(2)
             with c1:
